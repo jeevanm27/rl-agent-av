@@ -285,7 +285,14 @@ def train_agent():
         'lanes_count': 4,
         'vehicles_count': 50,
         'duration': 40,
-        'initial_spacing': 2
+        'initial_spacing': 2,
+        'collision_reward': -1.0,      # Penalty for collisions
+        'high_speed_reward': 0.4,      # Reward for maintaining high speed
+        'right_lane_reward': 0.1,      # Small reward for being in right lanes (faster lanes)
+        'lane_change_reward': 0.2,     # Reward for successful lane changes
+        'reward_speed_range': [20, 30], # Target speed range in m/s
+        'normalize_reward': True,
+        'offroad_terminal': True
     })
     
     # Print environment information for debugging
@@ -300,7 +307,7 @@ def train_agent():
     print(f"State dimension: {state_dim}")
     print(f"Action dimension: {action_dim}")
     
-    # Initialize the agent
+    # Initialize the agent with adjusted parameters
     agent = DBSAC(
         state_dim=state_dim,
         action_dim=action_dim,
@@ -309,7 +316,7 @@ def train_agent():
         critic_lr=3e-4,
         gamma=0.99,
         tau=0.005,
-        alpha=0.2,
+        alpha=0.2,  # Temperature parameter for exploration
         buffer_capacity=100000,
         recent_size=10000,
         batch_size=256
@@ -323,6 +330,7 @@ def train_agent():
     
     # Training loop
     episode_rewards = []
+    best_avg_reward = float('-inf')
     
     for episode in range(max_episodes):
         state, _ = env.reset()
@@ -330,7 +338,7 @@ def train_agent():
         
         for step in range(max_steps):
             action = agent.select_action(state)
-            next_state, reward, done, truncated, _ = env.step(action)
+            next_state, reward, done, truncated, info = env.step(action)
             
             # Store transition in replay buffer
             agent.replay_buffer.add(state, action, reward, next_state, done)
@@ -347,14 +355,20 @@ def train_agent():
                 
         episode_rewards.append(episode_reward)
         
-        # Print progress
+        # Print progress and save best model
         if (episode + 1) % eval_interval == 0:
             avg_reward = np.mean(episode_rewards[-eval_interval:])
             print(f"Episode {episode + 1}, Average Reward: {avg_reward:.2f}")
             
-        # Save models periodically
+            # Save if we have a new best model
+            if avg_reward > best_avg_reward:
+                best_avg_reward = avg_reward
+                agent.save_models("./models_best")
+                print(f"New best model saved with average reward: {avg_reward:.2f}")
+            
+        # Save periodic checkpoints
         if (episode + 1) % 100 == 0:
-            agent.save_models("./models")
+            agent.save_models(f"./models_checkpoint_{episode + 1}")
             
     return agent, episode_rewards
 
