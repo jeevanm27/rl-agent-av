@@ -44,87 +44,104 @@ class AdaptiveSafetyModule:
         
     def compute_traffic_density(self, vehicles_info: List[Dict]) -> Tuple[float, Dict]:
         """Enhanced traffic density computation with per-lane analysis."""
+        # Initialize default return values
+        default_lane_info = {
+            'lane_counts': defaultdict(int),
+            'lane_avg_speeds': defaultdict(float)
+        }
+        
         if not vehicles_info:
-            return 0.0, {}
+            return 0.0, default_lane_info
             
         # Initialize per-lane vehicle counts
         lane_counts = defaultdict(int)
         lane_speeds = defaultdict(list)
         
-        # Count vehicles and average speeds per lane
-        for vehicle in vehicles_info:
-            lane = vehicle.get('lane_index', 0)
-            if abs(vehicle.get('x', 0)) < 50:  # Within relevant range
-                lane_counts[lane] += 1
-                lane_speeds[lane].append(vehicle.get('vx', 0))
-        
-        # Compute average speed per lane
-        lane_avg_speeds = {
-            lane: np.mean(speeds) if speeds else 0
-            for lane, speeds in lane_speeds.items()
-        }
-        
-        # Overall density (normalized)
-        total_density = sum(lane_counts.values()) / (10.0 * len(lane_counts))
-        
-        return min(total_density, 1.0), {
-            'lane_counts': lane_counts,
-            'lane_avg_speeds': lane_avg_speeds
-        }
+        try:
+            # Count vehicles and average speeds per lane
+            for vehicle in vehicles_info:
+                lane = vehicle.get('lane_index', 0)
+                if abs(vehicle.get('x', 0)) < 50:  # Within relevant range
+                    lane_counts[lane] += 1
+                    lane_speeds[lane].append(vehicle.get('vx', 0))
+            
+            # Compute average speed per lane
+            lane_avg_speeds = {
+                lane: np.mean(speeds) if speeds else 0
+                for lane, speeds in lane_speeds.items()
+            }
+            
+            # Overall density (normalized)
+            total_density = sum(lane_counts.values()) / (10.0 * max(len(lane_counts), 1))
+            
+            return min(total_density, 1.0), {
+                'lane_counts': lane_counts,
+                'lane_avg_speeds': lane_avg_speeds
+            }
+        except Exception as e:
+            print(f"Warning: Error in compute_traffic_density: {str(e)}")
+            return 0.0, default_lane_info
     
     def compute_scenario_risk(self, vehicles_info: List[Dict], ego_speed: float, ego_lane: int) -> Tuple[float, Dict]:
         """Enhanced scenario risk computation with lane-specific analysis."""
-        if not vehicles_info:
-            return 0.0, {}
-            
-        risks = {
+        # Initialize default return values
+        default_risk_info = {
             'front_risk': 0.0,
             'rear_risk': 0.0,
             'side_risks': {},
             'lane_change_risks': {}
         }
         
-        for vehicle in vehicles_info:
-            rel_x = vehicle.get('x', 0)
-            rel_y = vehicle.get('y', 0)
-            rel_speed = ego_speed - vehicle.get('vx', 0)
-            vehicle_lane = vehicle.get('lane_index', 0)
+        if not vehicles_info:
+            return 0.0, default_risk_info
             
-            # Compute distance and time-to-collision
-            distance = abs(rel_x)
-            ttc = distance / abs(rel_speed) if abs(rel_speed) > 0.1 else float('inf')
+        risks = default_risk_info.copy()
+        
+        try:
+            for vehicle in vehicles_info:
+                rel_x = vehicle.get('x', 0)
+                rel_y = vehicle.get('y', 0)
+                rel_speed = ego_speed - vehicle.get('vx', 0)
+                vehicle_lane = vehicle.get('lane_index', 0)
+                
+                # Compute distance and time-to-collision
+                distance = abs(rel_x)
+                ttc = distance / abs(rel_speed) if abs(rel_speed) > 0.1 else float('inf')
+                
+                # Categorize risk based on relative position
+                if abs(rel_y) < 1.0:  # Same lane
+                    if rel_x > 0:  # Vehicle ahead
+                        risks['front_risk'] = max(risks['front_risk'], 
+                                                self._compute_individual_risk(distance, rel_speed, ttc))
+                    else:  # Vehicle behind
+                        risks['rear_risk'] = max(risks['rear_risk'], 
+                                               self._compute_individual_risk(distance, rel_speed, ttc))
+                else:  # Adjacent lanes
+                    lane_diff = int(round(rel_y))
+                    risks['side_risks'][ego_lane + lane_diff] = max(
+                        risks['side_risks'].get(ego_lane + lane_diff, 0.0),
+                        self._compute_individual_risk(distance, rel_speed, ttc) * 0.7
+                    )
             
-            # Categorize risk based on relative position
-            if abs(rel_y) < 1.0:  # Same lane
-                if rel_x > 0:  # Vehicle ahead
-                    risks['front_risk'] = max(risks['front_risk'], 
-                                            self._compute_individual_risk(distance, rel_speed, ttc))
-                else:  # Vehicle behind
-                    risks['rear_risk'] = max(risks['rear_risk'], 
-                                           self._compute_individual_risk(distance, rel_speed, ttc))
-            else:  # Adjacent lanes
-                lane_diff = int(round(rel_y))
-                risks['side_risks'][ego_lane + lane_diff] = max(
-                    risks['side_risks'].get(ego_lane + lane_diff, 0.0),
-                    self._compute_individual_risk(distance, rel_speed, ttc) * 0.7  # Reduced weight for side vehicles
-                )
-        
-        # Compute lane change risks
-        for target_lane in [ego_lane - 1, ego_lane + 1]:
-            if target_lane in risks['side_risks']:
-                risks['lane_change_risks'][target_lane] = max(
-                    risks['side_risks'][target_lane],
-                    risks['front_risk'] * 0.5,
-                    risks['rear_risk'] * 0.5
-                )
-        
-        # Overall risk is maximum of all risks
-        max_risk = max(
-            [risks['front_risk'], risks['rear_risk']] +
-            list(risks['side_risks'].values())
-        )
-        
-        return min(max_risk, 1.0), risks
+            # Compute lane change risks
+            for target_lane in [ego_lane - 1, ego_lane + 1]:
+                if target_lane in risks['side_risks']:
+                    risks['lane_change_risks'][target_lane] = max(
+                        risks['side_risks'][target_lane],
+                        risks['front_risk'] * 0.5,
+                        risks['rear_risk'] * 0.5
+                    )
+            
+            max_risk = max(
+                [risks['front_risk'], risks['rear_risk']] +
+                list(risks['side_risks'].values() or [0.0])
+            )
+            
+            return min(max_risk, 1.0), risks
+            
+        except Exception as e:
+            print(f"Warning: Error in compute_scenario_risk: {str(e)}")
+            return 0.0, default_risk_info
     
     def _compute_individual_risk(self, distance: float, rel_speed: float, ttc: float) -> float:
         """Helper function to compute risk for individual vehicle interactions."""
@@ -193,56 +210,71 @@ class AdaptiveSafetyModule:
                             action: int,
                             time_elapsed: float) -> Tuple[float, Dict]:
         """Enhanced safety reward computation with lane change incentives."""
-        thresholds = self.get_adaptive_thresholds(ego_speed, vehicles_info, ego_lane, time_elapsed)
-        
-        # Basic safety violations
-        ttc_violation = max(0, 1 - ttc/thresholds['ttc_threshold'])
-        headway_violation = max(0, 1 - headway/thresholds['headway_threshold'])
-        
-        # Lane change analysis
-        lane_info = thresholds['lane_info']
-        risk_info = thresholds['risk_info']
-        
-        # Initialize reward components
-        safety_penalty = 0.0
-        speed_reward = 0.0
-        lane_change_reward = 0.0
-        
-        # Safety penalty based on violations
-        safety_penalty = -(
-            ttc_violation * thresholds['safety_weight'] +
-            headway_violation * thresholds['safety_weight']
-        )
-        
-        # Speed reward
-        target_speed = 30.0  # m/s
-        speed_reward = 0.4 * (ego_speed / target_speed) * (1 - thresholds['risk_factor'])
-        
-        # Lane change reward
-        if action in [0, 2]:  # Lane change actions
-            if thresholds['lane_change_available']:
-                target_lane = ego_lane + (1 if action == 2 else -1)
-                
-                # Check if lane change is beneficial
-                current_lane_density = lane_info['lane_counts'].get(ego_lane, 0)
-                target_lane_density = lane_info['lane_counts'].get(target_lane, 0)
-                
-                if target_lane_density < current_lane_density:
-                    # Reward lane change if target lane is less congested
-                    lane_change_reward = 0.3 * (1 - risk_info['lane_change_risks'].get(target_lane, 1.0))
+        try:
+            thresholds = self.get_adaptive_thresholds(ego_speed, vehicles_info, ego_lane, time_elapsed)
+            
+            # Basic safety violations
+            ttc_violation = max(0, 1 - ttc/thresholds['ttc_threshold'])
+            headway_violation = max(0, 1 - headway/thresholds['headway_threshold'])
+            
+            # Lane change analysis
+            lane_info = thresholds.get('lane_info', {'lane_counts': defaultdict(int)})
+            risk_info = thresholds.get('risk_info', {'lane_change_risks': {}})
+            
+            # Initialize reward components
+            safety_penalty = 0.0
+            speed_reward = 0.0
+            lane_change_reward = 0.0
+            
+            # Safety penalty based on violations
+            safety_penalty = -(
+                ttc_violation * thresholds['safety_weight'] +
+                headway_violation * thresholds['safety_weight']
+            )
+            
+            # Speed reward
+            target_speed = 30.0  # m/s
+            speed_reward = 0.4 * (ego_speed / target_speed) * (1 - thresholds['risk_factor'])
+            
+            # Lane change reward
+            if action in [0, 2]:  # Lane change actions
+                if thresholds.get('lane_change_available', False):
+                    target_lane = ego_lane + (1 if action == 2 else -1)
                     
-                    # Update last lane change time if action is executed
-                    self.last_lane_change_time = time_elapsed
-        
-        # Combine rewards
-        total_reward = safety_penalty + speed_reward + lane_change_reward
-        
-        return total_reward, {
-            **thresholds,
-            'safety_penalty': safety_penalty,
-            'speed_reward': speed_reward,
-            'lane_change_reward': lane_change_reward
-        }
+                    # Check if lane change is beneficial
+                    current_lane_density = lane_info['lane_counts'].get(ego_lane, 0)
+                    target_lane_density = lane_info['lane_counts'].get(target_lane, 0)
+                    
+                    if target_lane_density < current_lane_density:
+                        # Reward lane change if target lane is less congested
+                        lane_change_reward = 0.3 * (1 - risk_info.get('lane_change_risks', {}).get(target_lane, 1.0))
+                        
+                        # Update last lane change time if action is executed
+                        self.last_lane_change_time = time_elapsed
+            
+            # Combine rewards
+            total_reward = safety_penalty + speed_reward + lane_change_reward
+            
+            return total_reward, {
+                **thresholds,
+                'safety_penalty': safety_penalty,
+                'speed_reward': speed_reward,
+                'lane_change_reward': lane_change_reward
+            }
+            
+        except Exception as e:
+            print(f"Warning: Error in compute_safety_reward: {str(e)}")
+            # Return safe default values
+            return 0.0, {
+                'ttc_threshold': self.base_ttc_threshold,
+                'headway_threshold': self.base_headway_threshold,
+                'safety_distance': self.base_safety_distance,
+                'safety_weight': self.min_safety_weight,
+                'risk_factor': 0.5,
+                'safety_penalty': 0.0,
+                'speed_reward': 0.0,
+                'lane_change_reward': 0.0
+            }
 
 class ReplayBuffer:
     def __init__(self, capacity: int, recent_size: int, epsilon: float = 0.4):
@@ -560,7 +592,7 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
         },
         'action': {
             'type': 'DiscreteMetaAction',
-            'target_speeds': [25, 30],  # Encourage higher speeds
+            'target_speeds': [25, 30],
             'longitudinal': True,
             'lateral': True,
         },
@@ -568,11 +600,11 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
         'vehicles_count': 50,
         'duration': 40,
         'initial_spacing': 2,
-        'collision_reward': -2.0,  # Increased collision penalty
+        'collision_reward': -2.0,
         'high_speed_reward': 0.4,
         'right_lane_reward': 0.1,
         'lane_change_reward': 0.2,
-        'reward_speed_range': [25, 30],  # Increased target speed range
+        'reward_speed_range': [25, 30],
         'normalize_reward': True,
         'offroad_terminal': True,
         'simulation_frequency': 15,
@@ -606,10 +638,6 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
             if metadata:
                 start_episode = metadata.get('episode', 0) + 1
                 print(f"Resuming training from episode {start_episode}")
-                
-                # Load best reward if available
-                best_avg_reward = metadata.get('metrics', {}).get('best_avg_reward', float('-inf'))
-                print(f"Previous best average reward: {best_avg_reward:.2f}")
     
     # Training parameters
     max_steps = 1000
@@ -619,7 +647,6 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
     
     # Training metrics
     episode_rewards = []
-    best_avg_reward = float('-inf')
     training_metrics = {'episode_rewards': [], 'avg_rewards': []}
     
     print(f"Starting training from episode {start_episode}")
@@ -666,7 +693,7 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
                 
                 if done or truncated:
                     break
-                    
+            
             episode_rewards.append(episode_reward)
             training_metrics['episode_rewards'].append(episode_reward)
             
@@ -675,40 +702,19 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
                 avg_reward = np.mean(episode_rewards[-eval_interval:])
                 training_metrics['avg_rewards'].append(avg_reward)
                 print(f"Episode {episode + 1}, Average Reward: {avg_reward:.2f}")
-                
-                # Update best model if we have a new best performance
-                if avg_reward > best_avg_reward:
-                    best_avg_reward = avg_reward
-                    best_model_path = os.path.join(checkpoint_dir, "best_model")
-                    
-                    # Save best model with temporary name first
-                    temp_best_path = os.path.join(checkpoint_dir, "temp_best_model")
-                    agent.save_models(
-                        temp_best_path,
-                        save_buffer=True,
-                        episode=episode,
-                        metrics={'avg_reward': avg_reward, 'best_avg_reward': best_avg_reward}
-                    )
-                    
-                    # Safely replace old best model
-                    if os.path.exists(best_model_path):
-                        shutil.rmtree(best_model_path)
-                    os.rename(temp_best_path, best_model_path)
-                    print(f"New best model saved with average reward: {avg_reward:.2f}")
             
             # Save checkpoint every 100 episodes
             if (episode + 1) % checkpoint_interval == 0:
-                # Save with temporary name first
-                temp_checkpoint_path = os.path.join(checkpoint_dir, f"temp_checkpoint_{episode + 1}")
                 checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{episode + 1}")
                 
+                # Save with temporary name first
+                temp_checkpoint_path = os.path.join(checkpoint_dir, f"temp_checkpoint_{episode + 1}")
                 agent.save_models(
                     temp_checkpoint_path,
                     save_buffer=True,
                     episode=episode,
                     metrics={
                         'episode_rewards': episode_rewards,
-                        'best_avg_reward': best_avg_reward,
                         'training_metrics': training_metrics
                     }
                 )
@@ -718,7 +724,7 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
                     shutil.rmtree(checkpoint_path)
                 os.rename(temp_checkpoint_path, checkpoint_path)
                 
-                # Keep only the latest checkpoint and best model
+                # Keep only the latest checkpoint
                 for old_checkpoint in os.listdir(checkpoint_dir):
                     if old_checkpoint.startswith("checkpoint_") and old_checkpoint != f"checkpoint_{episode + 1}":
                         old_path = os.path.join(checkpoint_dir, old_checkpoint)
@@ -736,7 +742,6 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
             episode=episode,
             metrics={
                 'episode_rewards': episode_rewards,
-                'best_avg_reward': best_avg_reward,
                 'training_metrics': training_metrics
             }
         )
@@ -753,7 +758,6 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
                 episode=episode,
                 metrics={
                     'episode_rewards': episode_rewards,
-                    'best_avg_reward': best_avg_reward,
                     'error': str(e)
                 }
             )
@@ -774,7 +778,7 @@ def evaluate_agent(agent, num_episodes=10):
         },
         'action': {
             'type': 'DiscreteMetaAction',
-            'target_speeds': [20, 25, 30]  # Limit the speed actions
+            'target_speeds': [20, 25, 30]  
         },
         'lanes_count': 4,
         'vehicles_count': 50,
