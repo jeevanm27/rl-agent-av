@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 import os
 import json
 import pickle
+import shutil
 
 # Set random seeds for reproducibility
 tf.random.set_seed(42)
@@ -306,8 +307,11 @@ class DBSAC:
                 return json.load(f)
         return None
 
-def train_agent(checkpoint_dir="./checkpoints", start_episode=0, max_episodes=1000):
-    """Train agent with checkpoint support."""
+def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", start_episode=0, max_episodes=1000):
+    """Train agent with checkpoint support and Google Drive integration."""
+    # Ensure checkpoint directory exists
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
     # Create and configure the environment
     env = gym.make('highway-v0', render_mode=None, config={
         'observation': {
@@ -323,28 +327,20 @@ def train_agent(checkpoint_dir="./checkpoints", start_episode=0, max_episodes=10
         'vehicles_count': 50,
         'duration': 40,
         'initial_spacing': 2,
-        'collision_reward': -1.0,      # Penalty for collisions
-        'high_speed_reward': 0.4,      # Reward for maintaining high speed
-        'right_lane_reward': 0.1,      # Small reward for being in right lanes (faster lanes)
-        'lane_change_reward': 0.2,     # Reward for successful lane changes
-        'reward_speed_range': [20, 30], # Target speed range in m/s
+        'collision_reward': -1.0,
+        'high_speed_reward': 0.4,
+        'right_lane_reward': 0.1,
+        'lane_change_reward': 0.2,
+        'reward_speed_range': [20, 30],
         'normalize_reward': True,
         'offroad_terminal': True
     })
     
-    # Print environment information for debugging
-    print(f"Observation space: {env.observation_space}")
-    print(f"Action space: {env.action_space}")
-    print(f"Number of actions: {env.action_space.n}")
-    
     # Get state and action dimensions
-    state_dim = env.observation_space.shape  # Now passing full shape tuple
+    state_dim = env.observation_space.shape
     action_dim = env.action_space.n
     
-    print(f"State dimension: {state_dim}")
-    print(f"Action dimension: {action_dim}")
-    
-    # Initialize or load agent
+    # Initialize agent
     agent = DBSAC(
         state_dim=state_dim,
         action_dim=action_dim,
@@ -357,16 +353,21 @@ def train_agent(checkpoint_dir="./checkpoints", start_episode=0, max_episodes=10
         checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("checkpoint_")]
         if checkpoints:
             latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("_")[1]))
-            metadata = agent.load_models(os.path.join(checkpoint_dir, latest_checkpoint), load_buffer=True)
+            checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
+            metadata = agent.load_models(checkpoint_path, load_buffer=True)
             if metadata:
-                start_episode = metadata['episode'] + 1
+                start_episode = metadata.get('episode', 0) + 1
                 print(f"Resuming training from episode {start_episode}")
+                
+                # Load best reward if available
+                best_avg_reward = metadata.get('metrics', {}).get('best_avg_reward', float('-inf'))
+                print(f"Previous best average reward: {best_avg_reward:.2f}")
     
     # Training parameters
     max_steps = 1000
     batch_size = 256
     eval_interval = 10
-    checkpoint_interval = 50  # Save checkpoint every 50 episodes
+    checkpoint_interval = 100  # Save checkpoint every 100 episodes
     
     # Training metrics
     episode_rewards = []
@@ -374,6 +375,7 @@ def train_agent(checkpoint_dir="./checkpoints", start_episode=0, max_episodes=10
     training_metrics = {'episode_rewards': [], 'avg_rewards': []}
     
     print(f"Starting training from episode {start_episode}")
+    print(f"Checkpoints will be saved every {checkpoint_interval} episodes to: {checkpoint_dir}")
     
     try:
         for episode in range(start_episode, max_episodes):
@@ -398,43 +400,97 @@ def train_agent(checkpoint_dir="./checkpoints", start_episode=0, max_episodes=10
             episode_rewards.append(episode_reward)
             training_metrics['episode_rewards'].append(episode_reward)
             
-            # Evaluation and checkpointing
+            # Print progress
             if (episode + 1) % eval_interval == 0:
                 avg_reward = np.mean(episode_rewards[-eval_interval:])
                 training_metrics['avg_rewards'].append(avg_reward)
                 print(f"Episode {episode + 1}, Average Reward: {avg_reward:.2f}")
                 
-                # Save best model
+                # Update best model if we have a new best performance
                 if avg_reward > best_avg_reward:
                     best_avg_reward = avg_reward
+                    best_model_path = os.path.join(checkpoint_dir, "best_model")
+                    
+                    # Save best model with temporary name first
+                    temp_best_path = os.path.join(checkpoint_dir, "temp_best_model")
                     agent.save_models(
-                        os.path.join(checkpoint_dir, "best_model"),
+                        temp_best_path,
                         save_buffer=True,
                         episode=episode,
-                        metrics={'avg_reward': avg_reward}
+                        metrics={'avg_reward': avg_reward, 'best_avg_reward': best_avg_reward}
                     )
+                    
+                    # Safely replace old best model
+                    if os.path.exists(best_model_path):
+                        shutil.rmtree(best_model_path)
+                    os.rename(temp_best_path, best_model_path)
                     print(f"New best model saved with average reward: {avg_reward:.2f}")
             
-            # Regular checkpoints
+            # Save checkpoint every 100 episodes
             if (episode + 1) % checkpoint_interval == 0:
+                # Save with temporary name first
+                temp_checkpoint_path = os.path.join(checkpoint_dir, f"temp_checkpoint_{episode + 1}")
                 checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{episode + 1}")
+                
                 agent.save_models(
-                    checkpoint_path,
+                    temp_checkpoint_path,
                     save_buffer=True,
                     episode=episode,
-                    metrics={'episode_rewards': episode_rewards, 'best_avg_reward': best_avg_reward}
+                    metrics={
+                        'episode_rewards': episode_rewards,
+                        'best_avg_reward': best_avg_reward,
+                        'training_metrics': training_metrics
+                    }
                 )
+                
+                # Safely replace old checkpoint
+                if os.path.exists(checkpoint_path):
+                    shutil.rmtree(checkpoint_path)
+                os.rename(temp_checkpoint_path, checkpoint_path)
+                
+                # Keep only the latest checkpoint and best model
+                for old_checkpoint in os.listdir(checkpoint_dir):
+                    if old_checkpoint.startswith("checkpoint_") and old_checkpoint != f"checkpoint_{episode + 1}":
+                        old_path = os.path.join(checkpoint_dir, old_checkpoint)
+                        if os.path.exists(old_path):
+                            shutil.rmtree(old_path)
+                
                 print(f"Checkpoint saved at episode {episode + 1}")
                 
     except KeyboardInterrupt:
-        print("\nTraining interrupted. Saving checkpoint...")
-        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{episode}")
+        print("\nTraining interrupted. Saving final checkpoint...")
+        final_checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_interrupted_{episode}")
         agent.save_models(
-            checkpoint_path,
+            final_checkpoint_path,
             save_buffer=True,
             episode=episode,
-            metrics={'episode_rewards': episode_rewards, 'best_avg_reward': best_avg_reward}
+            metrics={
+                'episode_rewards': episode_rewards,
+                'best_avg_reward': best_avg_reward,
+                'training_metrics': training_metrics
+            }
         )
+        print(f"Interrupted checkpoint saved at: {final_checkpoint_path}")
+        
+    except Exception as e:
+        print(f"\nError during training: {str(e)}")
+        print("Attempting to save emergency checkpoint...")
+        emergency_path = os.path.join(checkpoint_dir, "emergency_checkpoint")
+        try:
+            agent.save_models(
+                emergency_path,
+                save_buffer=True,
+                episode=episode,
+                metrics={
+                    'episode_rewards': episode_rewards,
+                    'best_avg_reward': best_avg_reward,
+                    'error': str(e)
+                }
+            )
+            print(f"Emergency checkpoint saved at: {emergency_path}")
+        except:
+            print("Failed to save emergency checkpoint")
+        raise
         
     return agent, episode_rewards
 
@@ -478,13 +534,14 @@ def evaluate_agent(agent, num_episodes=10):
     return np.mean(eval_rewards)
 
 if __name__ == "__main__":
-    # Create checkpoint directory
-    checkpoint_dir = "./checkpoints"
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Set up checkpoint directory in Google Drive
+    CHECKPOINT_DIR = "/content/drive/MyDrive/highway_rl_checkpoints"
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
-    # Train the agent
     print("Starting training...")
-    agent, training_rewards = train_agent(checkpoint_dir=checkpoint_dir)
+    print(f"Checkpoints will be saved to: {CHECKPOINT_DIR}")
+    
+    agent, training_rewards = train_agent(checkpoint_dir=CHECKPOINT_DIR)
     
     # Evaluate the trained agent
     print("\nStarting evaluation...")
