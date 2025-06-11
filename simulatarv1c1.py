@@ -6,7 +6,7 @@
 !apt-get install -y ffmpeg
 !apt-get install -y xvfb
 !pip install pyvirtualdisplay
-
+!pip install imageio
 
 # Import required libraries
 import gymnasium as gym
@@ -19,8 +19,13 @@ from pyvirtualdisplay import Display
 from IPython.display import HTML
 from base64 import b64encode
 import os
+import imageio
 
+# Start virtual display
+virtual_display = Display(visible=0, size=(1400, 900))
+virtual_display.start()
 
+# Define model architecture
 class Actor(tf.keras.Model):
     def __init__(self, state_dim: Tuple[int, ...], action_dim: int, hidden_dims: List[int]):
         super(Actor, self).__init__()
@@ -72,12 +77,6 @@ class DBSAC:
         
         return int(action)
 
-
-# Start virtual display
-virtual_display = Display(visible=0, size=(1400, 900))
-virtual_display.start()
-
-
 def record_video(env, agent, video_length=500):
     """Record agent's behavior and return video as HTML."""
     frames = []
@@ -96,10 +95,6 @@ def record_video(env, agent, video_length=500):
     env.close()
     
     # Convert frames to video
-    import imageio
-    import tempfile
-    
-    # Save frames as temporary video file
     with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
         writer = imageio.get_writer(f.name, fps=15)
         for frame in frames:
@@ -111,58 +106,11 @@ def record_video(env, agent, video_length=500):
             video_data = video_file.read()
     
     # Clean up temporary file
-    import os
     os.unlink(f.name)
     
     # Encode video in base64 and create HTML
     video = b64encode(video_data).decode()
     return HTML(f'<video width="800" height="600" controls><source src="data:video/mp4;base64,{video}" type="video/mp4"></video>')
-
-
-
-# Create and configure environment
-env = gym.make('highway-v0', render_mode='rgb_array', config={
-    'observation': {
-        'type': 'Kinematics',
-        'features': ['presence', 'x', 'y', 'vx', 'vy'],
-        'absolute': True,
-        'normalize': True,
-    },
-    'action': {
-        'type': 'DiscreteMetaAction',
-    },
-    'lanes_count': 4,
-    'vehicles_count': 50,
-    'duration': 40,
-    'initial_spacing': 2,
-    'collision_reward': -1.0,
-    'high_speed_reward': 0.4,
-    'right_lane_reward': 0.1,
-    'lane_change_reward': 0.2,
-    'reward_speed_range': [20, 30],
-    'normalize_reward': True,
-    'offroad_terminal': True,
-    'screen_width': 800,
-    'screen_height': 600,
-    'centering_position': [0.3, 0.5],
-    'scaling': 5.5,
-    'show_trajectories': True
-})
-
-# Initialize agent
-state_dim = env.observation_space.shape
-action_dim = env.action_space.n
-agent = DBSAC(state_dim, action_dim)
-
-# Load trained weights
-model_path = "models_best"  # or use the specific checkpoint you want
-agent.load_models(model_path)
-
-# Record and display video
-video = record_video(env, agent)
-video
-
-
 
 def evaluate_episodes(env, agent, num_episodes=5):
     total_rewards = []
@@ -211,5 +159,76 @@ def evaluate_episodes(env, agent, num_episodes=5):
         print(f"Average Speed: {np.mean(total_speeds):.2f} ± {np.std(total_speeds):.2f} m/s")
     print(f"Average Lane Changes: {np.mean(total_lane_changes):.2f} ± {np.std(total_lane_changes):.2f}")
 
-# Run evaluation
-evaluate_episodes(env, agent)
+# Create a directory for models if it doesn't exist
+!mkdir -p /content/models
+
+print("\nPlease upload your model files to /content/models/")
+print("Required files: actor.weights.h5")
+
+# Create and configure environment
+env = gym.make('highway-v0', render_mode='rgb_array', config={
+    'observation': {
+        'type': 'Kinematics',
+        'features': ['presence', 'x', 'y', 'vx', 'vy'],
+        'absolute': True,
+        'normalize': True,
+    },
+    'action': {
+        'type': 'DiscreteMetaAction',
+    },
+    'lanes_count': 4,
+    'vehicles_count': 50,
+    'duration': 40,
+    'initial_spacing': 2,
+    'collision_reward': -1.0,
+    'high_speed_reward': 0.4,
+    'right_lane_reward': 0.1,
+    'lane_change_reward': 0.2,
+    'reward_speed_range': [20, 30],
+    'normalize_reward': True,
+    'offroad_terminal': True,
+    'screen_width': 800,
+    'screen_height': 600,
+    'centering_position': [0.3, 0.5],
+    'scaling': 5.5,
+    'show_trajectories': True
+})
+
+# Initialize agent
+state_dim = env.observation_space.shape
+action_dim = env.action_space.n
+agent = DBSAC(state_dim, action_dim)
+
+# Try to load model from different possible locations
+model_paths = [
+    '/content/models/models_best',
+    '/content/models',
+    'models_best',
+    'models'
+]
+
+model_loaded = False
+for path in model_paths:
+    try:
+        if os.path.exists(os.path.join(path, 'actor.weights.h5')):
+            agent.load_models(path)
+            print(f"Successfully loaded model from {path}")
+            model_loaded = True
+            break
+    except Exception as e:
+        continue
+
+if not model_loaded:
+    print("\nError: Could not find model files!")
+    print("Please make sure you have uploaded actor.weights.h5 to one of these locations:")
+    for path in model_paths:
+        print(f"- {path}")
+else:
+    # Generate and display video
+    print("\nGenerating video of agent's performance...")
+    video = record_video(env, agent)
+    display(video)
+    
+    # Run evaluation
+    print("\nRunning detailed evaluation...")
+    evaluate_episodes(env, agent)
