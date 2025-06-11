@@ -259,14 +259,14 @@ class DBSAC:
     def save_models(self, path: str):
         if not os.path.exists(path):
             os.makedirs(path)
-        self.actor.save_weights(f"{path}/actor")
-        self.critic_1.save_weights(f"{path}/critic_1")
-        self.critic_2.save_weights(f"{path}/critic_2")
+        self.actor.save_weights(f"{path}/actor.weights.h5")
+        self.critic_1.save_weights(f"{path}/critic_1.weights.h5")
+        self.critic_2.save_weights(f"{path}/critic_2.weights.h5")
         
     def load_models(self, path: str):
-        self.actor.load_weights(f"{path}/actor")
-        self.critic_1.load_weights(f"{path}/critic_1")
-        self.critic_2.load_weights(f"{path}/critic_2")
+        self.actor.load_weights(f"{path}/actor.weights.h5")
+        self.critic_1.load_weights(f"{path}/critic_1.weights.h5")
+        self.critic_2.load_weights(f"{path}/critic_2.weights.h5")
         self.target_critic_1.set_weights(self.critic_1.get_weights())
         self.target_critic_2.set_weights(self.critic_2.get_weights())
 
