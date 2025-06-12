@@ -18,28 +18,21 @@ class DQNNetwork(tf.keras.Model):
                 tf.keras.layers.Dense(
                     dim, 
                     activation='relu',
-                    kernel_initializer=tf.keras.initializers.HeUniform(),
-                    bias_initializer=tf.keras.initializers.Zeros()
+                    kernel_initializer='glorot_uniform'
                 ),
-                tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.Dropout(0.1)
+                tf.keras.layers.LayerNormalization()  # Changed from BatchNorm to LayerNorm
             ])
             
-        # Final layer for Q-values with proper initialization
+        # Final layer for Q-values
         self.q_head = tf.keras.layers.Dense(
             action_dim,
-            kernel_initializer=tf.keras.initializers.HeUniform(),
-            bias_initializer=tf.keras.initializers.Zeros()
+            kernel_initializer='glorot_uniform'
         )
         
-    def call(self, state, training=False):
+    def call(self, state):
         x = self.flatten(state)
         for layer in self.layers_list:
-            if isinstance(layer, tf.keras.layers.BatchNormalization) or \
-               isinstance(layer, tf.keras.layers.Dropout):
-                x = layer(x, training=training)
-            else:
-                x = layer(x)
+            x = layer(x)
         return self.q_head(x)
 
 def create_env(render_mode='rgb_array'):
@@ -111,11 +104,18 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
     
     # Load weights
     try:
+        # Try to load weights directly
         model.load_weights(model_path)
         print(f"Successfully loaded model from {model_path}")
     except Exception as e:
         print(f"Error loading model: {str(e)}")
-        return
+        try:
+            # If direct loading fails, try loading as a saved model
+            model = tf.keras.models.load_model(model_path)
+            print(f"Successfully loaded saved model from {model_path}")
+        except Exception as e:
+            print(f"Error loading saved model: {str(e)}")
+            return
     
     # Evaluation metrics
     episode_rewards = []
@@ -125,7 +125,9 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
     
     if save_video:
         from gymnasium.wrappers import RecordVideo
-        env = RecordVideo(env, "videos/highway-evaluation")
+        video_path = "videos/highway-evaluation"
+        print(f"Videos will be saved to {video_path}")
+        env = RecordVideo(env, video_path)
     
     try:
         for episode in range(num_episodes):
@@ -137,8 +139,8 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
             while not done:
                 # Get action from model
                 state_tensor = tf.convert_to_tensor([state], dtype=tf.float32)
-                q_values = model(state_tensor, training=False)[0]
-                action = int(tf.argmax(q_values))
+                q_values = model(state_tensor)
+                action = int(tf.argmax(q_values[0]))
                 
                 # Take step in environment
                 next_state, reward, done, truncated, info = env.step(action)
@@ -174,22 +176,34 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
     finally:
         env.close()
         
-        # Print summary
-        print("\nEvaluation Summary:")
-        print(f"Average Reward: {np.mean(episode_rewards):.2f} ± {np.std(episode_rewards):.2f}")
-        print(f"Average Episode Length: {np.mean(episode_lengths):.1f} steps")
-        print(f"Success Rate: {success_count/num_episodes*100:.1f}%")
-        print(f"Collision Rate: {collision_count/num_episodes*100:.1f}%")
-        
-        if save_video:
-            print("\nVideo saved in 'videos/highway-evaluation' directory")
+        if episode_rewards:  # Only print summary if we have data
+            print("\nEvaluation Summary:")
+            print(f"Average Reward: {np.mean(episode_rewards):.2f} ± {np.std(episode_rewards):.2f}")
+            print(f"Average Episode Length: {np.mean(episode_lengths):.1f} steps")
+            print(f"Success Rate: {success_count/len(episode_rewards)*100:.1f}%")
+            print(f"Collision Rate: {collision_count/len(episode_rewards)*100:.1f}%")
+            
+            if save_video:
+                print(f"\nVideos saved in '{video_path}' directory")
 
 if __name__ == "__main__":
-    # Example usage
-    model_path = "/content/checkpoints/q_network.weights (2).h5"
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Evaluate a trained highway environment model')
+    parser.add_argument('--model_path', type=str, default="/content/checkpoints/q_network.weights (2).h5",
+                        help='Path to the trained model weights')
+    parser.add_argument('--episodes', type=int, default=5,
+                        help='Number of episodes to evaluate')
+    parser.add_argument('--render', action='store_true',
+                        help='Whether to render the environment')
+    parser.add_argument('--save_video', action='store_true',
+                        help='Whether to save evaluation videos')
+    
+    args = parser.parse_args()
+    
     evaluate_model(
-        model_path=model_path,
-        num_episodes=5,
-        render=True,
-        save_video=True
+        model_path=args.model_path,
+        num_episodes=args.episodes,
+        render=args.render,
+        save_video=args.save_video
     ) 
