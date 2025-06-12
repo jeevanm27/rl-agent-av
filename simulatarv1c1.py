@@ -4,6 +4,8 @@ import gymnasium as gym
 import highway_env
 from typing import Dict, List, Tuple
 import time
+from IPython import display
+import PIL.Image
 
 class DQNNetwork(tf.keras.Model):
     def __init__(self, state_dim: Tuple[int, ...], action_dim: int, hidden_dims: List[int]):
@@ -20,7 +22,7 @@ class DQNNetwork(tf.keras.Model):
                     activation='relu',
                     kernel_initializer='glorot_uniform'
                 ),
-                tf.keras.layers.LayerNormalization()  # Changed from BatchNorm to LayerNorm
+                tf.keras.layers.LayerNormalization()
             ])
             
         # Final layer for Q-values
@@ -35,9 +37,9 @@ class DQNNetwork(tf.keras.Model):
             x = layer(x)
         return self.q_head(x)
 
-def create_env(render_mode='rgb_array'):
+def create_env():
     """Create the highway environment with specific settings."""
-    env = gym.make('highway-v0', render_mode=render_mode, config={
+    env = gym.make('highway-v0', render_mode='rgb_array', config={
         'observation': {
             'type': 'Kinematics',
             'features': ['presence', 'x', 'y', 'vx', 'vy'],
@@ -78,18 +80,25 @@ def create_env(render_mode='rgb_array'):
     })
     return env
 
-def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, save_video: bool = False):
+def display_video(frames, fps=30):
+    """Display a list of frames as a video in the notebook."""
+    from IPython.display import clear_output
+    
+    for frame in frames:
+        clear_output(wait=True)
+        display.display(PIL.Image.fromarray(frame))
+        time.sleep(1/fps)
+
+def evaluate_model(model_path: str, num_episodes: int = 5):
     """
     Evaluate a trained model on the highway environment.
     
     Args:
         model_path: Path to the trained model weights
         num_episodes: Number of episodes to evaluate
-        render: Whether to render the environment
-        save_video: Whether to save the evaluation as a video
     """
     # Create environment
-    env = create_env(render_mode='rgb_array' if render or save_video else None)
+    env = create_env()
     
     # Get state and action dimensions
     state_dim = env.observation_space.shape
@@ -123,18 +132,13 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
     collision_count = 0
     success_count = 0
     
-    if save_video:
-        from gymnasium.wrappers import RecordVideo
-        video_path = "videos/highway-evaluation"
-        print(f"Videos will be saved to {video_path}")
-        env = RecordVideo(env, video_path)
-    
     try:
         for episode in range(num_episodes):
             state, _ = env.reset()
             episode_reward = 0
             steps = 0
             done = False
+            frames = []  # Store frames for this episode
             
             while not done:
                 # Get action from model
@@ -145,9 +149,9 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
                 # Take step in environment
                 next_state, reward, done, truncated, info = env.step(action)
                 
-                if render and not save_video:
-                    env.render()
-                    time.sleep(0.1)  # Add delay to make visualization viewable
+                # Render and store frame
+                frame = env.render()
+                frames.append(frame)
                 
                 episode_reward += reward
                 state = next_state
@@ -169,6 +173,9 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
                   f"Reward: {episode_reward:.2f}, "
                   f"Steps: {steps}, "
                   f"{'Collision' if info.get('crashed', False) else 'Success'}")
+            
+            # Display the episode
+            display_video(frames)
     
     except KeyboardInterrupt:
         print("\nEvaluation interrupted by user")
@@ -182,9 +189,6 @@ def evaluate_model(model_path: str, num_episodes: int = 5, render: bool = True, 
             print(f"Average Episode Length: {np.mean(episode_lengths):.1f} steps")
             print(f"Success Rate: {success_count/len(episode_rewards)*100:.1f}%")
             print(f"Collision Rate: {collision_count/len(episode_rewards)*100:.1f}%")
-            
-            if save_video:
-                print(f"\nVideos saved in '{video_path}' directory")
 
 if __name__ == "__main__":
     import argparse
@@ -194,16 +198,10 @@ if __name__ == "__main__":
                         help='Path to the trained model weights')
     parser.add_argument('--episodes', type=int, default=5,
                         help='Number of episodes to evaluate')
-    parser.add_argument('--render', action='store_true',
-                        help='Whether to render the environment')
-    parser.add_argument('--save_video', action='store_true',
-                        help='Whether to save evaluation videos')
     
     args = parser.parse_args()
     
     evaluate_model(
         model_path=args.model_path,
-        num_episodes=args.episodes,
-        render=args.render,
-        save_video=args.save_video
+        num_episodes=args.episodes
     ) 
