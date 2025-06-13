@@ -894,16 +894,38 @@ def evaluate_agent(agent, num_episodes=10):
     return np.mean(eval_rewards)
 
 if __name__ == "__main__":
+    # Mount Google Drive for Colab
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive')
+        print("Google Drive mounted successfully")
+    except ImportError:
+        print("Not running in Colab environment")
+    
     # Set up checkpoint directory in Google Drive
-    CHECKPOINT_DIR = "C:/Users/welcome/OneDrive/Desktop/intern/v1/highway_rl_checkpoints"
+    CHECKPOINT_DIR = "/content/drive/MyDrive/highway_rl_checkpoints"
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
     print("Starting training...")
-    print(f"Checkpoints will be saved to: {CHECKPOINT_DIR}")
+    print(f"Checkpoints will be saved to Google Drive at: {CHECKPOINT_DIR}")
+    
+    # Verify Google Drive access
+    try:
+        test_file = os.path.join(CHECKPOINT_DIR, "test.txt")
+        with open(test_file, "w") as f:
+            f.write("Test file to verify Google Drive access")
+        os.remove(test_file)
+        print("Successfully verified Google Drive write access")
+    except Exception as e:
+        print(f"Warning: Could not verify Google Drive access. Error: {str(e)}")
+        print("Please ensure Google Drive is mounted properly")
     
     agent, training_rewards = train_agent(checkpoint_dir=CHECKPOINT_DIR)
     
     # Evaluate the trained agent
     print("\nStarting evaluation...")
     mean_eval_reward = evaluate_agent(agent)
-    print(f"\nMean evaluation reward: {mean_eval_reward:.2f}") 
+    print(f"\nMean evaluation reward: {mean_eval_reward:.2f}")
+    
+    print(f"\nCheckpoints have been saved to: {CHECKPOINT_DIR}")
+    print("You can find your saved models in Google Drive under the 'highway_rl_checkpoints' folder") 
