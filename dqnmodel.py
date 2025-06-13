@@ -861,15 +861,24 @@ def evaluate_agent(agent, num_episodes=10):
             'features': ['presence', 'x', 'y', 'vx', 'vy'],
             'absolute': True,
             'normalize': True,
+            'vehicles_count': 15,  # Match the training environment
+            'features_range': {
+                'x': [-100, 100],
+                'y': [-100, 100],
+                'vx': [-30, 30],
+                'vy': [-30, 30]
+            },
         },
         'action': {
             'type': 'DiscreteMetaAction',
-            'target_speeds': [20, 25, 30]  
+            'target_speeds': [20, 25, 30],  # Match the training environment
+            'longitudinal': True,
+            'lateral': True,
         },
         'lanes_count': 4,
-        'vehicles_count': 50,
+        'vehicles_count': 40,  # Match the training environment
         'duration': 40,
-        'initial_spacing': 2
+        'initial_spacing': 2.5
     })
     
     eval_rewards = []
