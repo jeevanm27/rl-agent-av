@@ -18,318 +18,187 @@ random.seed(42)
 
 class AdaptiveSafetyModule:
     def __init__(self):
-        # Base safety thresholds with more conservative values
-        self.base_ttc_threshold = 3.0  # Increased from 2.0 for better safety margin
-        self.base_headway_threshold = 2.0  # Increased from 1.5 for safer following distance
-        self.base_safety_distance = 25.0  # Increased from 20.0 for better spacing
+        # Core safety parameters
+        self.safe_distance = 20.0
+        self.safe_speed = 30.0
+        self.min_speed = 20.0
         
-        # Lane change specific parameters
-        self.min_lane_change_ttc = 4.0  # Minimum TTC required for lane change
-        self.min_lane_change_space = 30.0  # Minimum space required for lane change
-        self.lane_change_cooldown = 2.0  # Seconds to wait between lane changes
+        # Weights for reward components
+        self.collision_weight = 0.4
+        self.speed_weight = 0.3
+        self.lane_change_weight = 0.3
         
-        # Adaptive weights with emphasis on speed and safety
-        self.speed_weight = 0.35  # Increased emphasis on speed
-        self.density_weight = 0.25  # Slightly reduced
-        self.scenario_weight = 0.40  # Maintained for risk assessment
-        
-        # Safety reward weights with wider range
-        self.min_safety_weight = 0.3  # Increased from 0.2
-        self.max_safety_weight = 0.9  # Increased from 0.8
-        
-        # Historical tracking
-        self.risk_history = deque(maxlen=100)
-        self.avg_risk_level = 0.5
+        # Lane change parameters
         self.last_lane_change_time = 0
+        self.lane_change_cooldown = 2.0  # seconds
         
-    def compute_traffic_density(self, vehicles_info: List[Dict]) -> Tuple[float, Dict]:
-        """Enhanced traffic density computation with per-lane analysis."""
-        # Initialize default return values
-        default_lane_info = {
-            'lane_counts': defaultdict(int),
-            'lane_avg_speeds': defaultdict(float)
-        }
-        
-        if not vehicles_info:
-            return 0.0, default_lane_info
-            
-        # Initialize per-lane vehicle counts
-        lane_counts = defaultdict(int)
-        lane_speeds = defaultdict(list)
-        
-        try:
-            # Count vehicles and average speeds per lane
-            for vehicle in vehicles_info:
-                lane = vehicle.get('lane_index', 0)
-                if abs(vehicle.get('x', 0)) < 50:  # Within relevant range
-                    lane_counts[lane] += 1
-                    lane_speeds[lane].append(vehicle.get('vx', 0))
-            
-            # Compute average speed per lane
-            lane_avg_speeds = {
-                lane: np.mean(speeds) if speeds else 0
-                for lane, speeds in lane_speeds.items()
-            }
-            
-            # Overall density (normalized)
-            total_density = sum(lane_counts.values()) / (10.0 * max(len(lane_counts), 1))
-            
-            return min(total_density, 1.0), {
-                'lane_counts': lane_counts,
-                'lane_avg_speeds': lane_avg_speeds
-            }
-        except Exception as e:
-            print(f"Warning: Error in compute_traffic_density: {str(e)}")
-            return 0.0, default_lane_info
-    
-    def compute_scenario_risk(self, vehicles_info: List[Dict], ego_speed: float, ego_lane: int) -> Tuple[float, Dict]:
-        """Enhanced scenario risk computation with lane-specific analysis."""
-        # Initialize default return values
-        default_risk_info = {
-            'front_risk': 0.0,
-            'rear_risk': 0.0,
-            'side_risks': {},
-            'lane_change_risks': {}
-        }
-        
-        if not vehicles_info:
-            return 0.0, default_risk_info
-            
-        risks = default_risk_info.copy()
-        
-        try:
-            for vehicle in vehicles_info:
-                rel_x = vehicle.get('x', 0)
-                rel_y = vehicle.get('y', 0)
-                rel_speed = ego_speed - vehicle.get('vx', 0)
-                vehicle_lane = vehicle.get('lane_index', 0)
-                
-                # Compute distance and time-to-collision
-                distance = abs(rel_x)
-                ttc = distance / abs(rel_speed) if abs(rel_speed) > 0.1 else float('inf')
-                
-                # Categorize risk based on relative position
-                if abs(rel_y) < 1.0:  # Same lane
-                    if rel_x > 0:  # Vehicle ahead
-                        risks['front_risk'] = max(risks['front_risk'], 
-                                                self._compute_individual_risk(distance, rel_speed, ttc))
-                    else:  # Vehicle behind
-                        risks['rear_risk'] = max(risks['rear_risk'], 
-                                               self._compute_individual_risk(distance, rel_speed, ttc))
-                else:  # Adjacent lanes
-                    lane_diff = int(round(rel_y))
-                    risks['side_risks'][ego_lane + lane_diff] = max(
-                        risks['side_risks'].get(ego_lane + lane_diff, 0.0),
-                        self._compute_individual_risk(distance, rel_speed, ttc) * 0.7
-                    )
-            
-            # Compute lane change risks
-            for target_lane in [ego_lane - 1, ego_lane + 1]:
-                if target_lane in risks['side_risks']:
-                    risks['lane_change_risks'][target_lane] = max(
-                        risks['side_risks'][target_lane],
-                        risks['front_risk'] * 0.5,
-                        risks['rear_risk'] * 0.5
-                    )
-            
-            max_risk = max(
-                [risks['front_risk'], risks['rear_risk']] +
-                list(risks['side_risks'].values() or [0.0])
-            )
-            
-            return min(max_risk, 1.0), risks
-            
-        except Exception as e:
-            print(f"Warning: Error in compute_scenario_risk: {str(e)}")
-            return 0.0, default_risk_info
-    
-    def _compute_individual_risk(self, distance: float, rel_speed: float, ttc: float) -> float:
-        """Helper function to compute risk for individual vehicle interactions."""
-        # Base risk from distance
-        distance_risk = 1.0 / (1.0 + distance/20.0)
-        
-        # Speed risk increases with closing speed
-        speed_risk = abs(rel_speed) / 30.0 if rel_speed < 0 else 0.0
-        
-        # TTC risk
-        ttc_risk = 1.0 / (1.0 + ttc) if ttc != float('inf') else 0.0
-        
-        # Combine risks with weights
-        return min(0.4 * distance_risk + 0.3 * speed_risk + 0.3 * ttc_risk, 1.0)
-    
-    def get_adaptive_thresholds(self, ego_speed: float, vehicles_info: List[Dict], ego_lane: int, time_elapsed: float) -> Dict[str, float]:
-        """Enhanced adaptive thresholds with lane change considerations."""
-        # Normalize ego speed (assuming max speed of 30 m/s)
-        norm_speed = min(ego_speed / 30.0, 1.0)
-        
-        # Compute enhanced traffic density and scenario risk
-        traffic_density, lane_info = self.compute_traffic_density(vehicles_info)
-        scenario_risk, risk_info = self.compute_scenario_risk(vehicles_info, ego_speed, ego_lane)
-        
-        # Compute overall risk factor
-        risk_factor = (
-            self.speed_weight * norm_speed +
-            self.density_weight * traffic_density +
-            self.scenario_weight * scenario_risk
-        )
-        
-        # Update risk history and average
-        self.risk_history.append(risk_factor)
-        self.avg_risk_level = np.mean(list(self.risk_history))
-        
-        # Compute lane change availability
-        lane_change_available = (time_elapsed - self.last_lane_change_time) > self.lane_change_cooldown
-        
-        # Adjust thresholds based on risk factor
-        ttc_threshold = self.base_ttc_threshold * (1.0 + risk_factor)
-        headway_threshold = self.base_headway_threshold * (1.0 + risk_factor)
-        safety_distance = self.base_safety_distance * (1.0 + risk_factor)
-        
-        # Compute adaptive safety weight
-        safety_weight = self.min_safety_weight + (
-            self.max_safety_weight - self.min_safety_weight
-        ) * self.avg_risk_level
-        
-        return {
-            'ttc_threshold': ttc_threshold,
-            'headway_threshold': headway_threshold,
-            'safety_distance': safety_distance,
-            'safety_weight': safety_weight,
-            'risk_factor': risk_factor,
-            'lane_info': lane_info,
-            'risk_info': risk_info,
-            'lane_change_available': lane_change_available
-        }
-    
     def compute_safety_reward(self, 
-                            ego_speed: float,
-                            vehicles_info: List[Dict],
-                            ttc: float,
-                            headway: float,
-                            ego_lane: int,
+                            observation: np.ndarray,
                             action: int,
-                            time_elapsed: float) -> Tuple[float, Dict]:
-        """Enhanced safety reward computation with lane change incentives."""
+                            info: dict,
+                            time_elapsed: float) -> float:
+        """
+        Compute safety reward based on actual environment observations.
+        observation shape: (vehicles_count, features) where features are [presence, x, y, vx, vy]
+        """
         try:
-            thresholds = self.get_adaptive_thresholds(ego_speed, vehicles_info, ego_lane, time_elapsed)
+            # Extract ego vehicle state (first vehicle in observation)
+            ego_presence, ego_x, ego_y, ego_vx, ego_vy = observation[0]
+            ego_speed = np.sqrt(ego_vx**2 + ego_vy**2)
             
-            # Basic safety violations
-            ttc_violation = max(0, 1 - ttc/thresholds['ttc_threshold'])
-            headway_violation = max(0, 1 - headway/thresholds['headway_threshold'])
-            
-            # Lane change analysis
-            lane_info = thresholds.get('lane_info', {'lane_counts': defaultdict(int)})
-            risk_info = thresholds.get('risk_info', {'lane_change_risks': {}})
-            
-            # Initialize reward components
-            safety_penalty = 0.0
+            # Initialize rewards
+            collision_reward = 0.0
             speed_reward = 0.0
             lane_change_reward = 0.0
             
-            # Safety penalty based on violations
-            safety_penalty = -(
-                ttc_violation * thresholds['safety_weight'] +
-                headway_violation * thresholds['safety_weight']
-            )
+            # Check other vehicles for potential collisions
+            for i in range(1, len(observation)):
+                if observation[i][0]:  # if vehicle is present
+                    _, other_x, other_y, other_vx, other_vy = observation[i]
+                    
+                    # Compute relative distance
+                    rel_x = other_x - ego_x
+                    rel_y = other_y - ego_y
+                    distance = np.sqrt(rel_x**2 + rel_y**2)
+                    
+                    # Collision reward (negative for being too close)
+                    if distance < self.safe_distance:
+                        collision_reward -= (1.0 - distance/self.safe_distance)
             
             # Speed reward
-            target_speed = 30.0  # m/s
-            speed_reward = 0.4 * (ego_speed / target_speed) * (1 - thresholds['risk_factor'])
+            if ego_speed < self.min_speed:
+                speed_reward = ego_speed/self.min_speed - 1.0
+            elif ego_speed > self.safe_speed:
+                speed_reward = 1.0 - (ego_speed - self.safe_speed)/self.safe_speed
+            else:
+                speed_reward = ego_speed/self.safe_speed
             
             # Lane change reward
             if action in [0, 2]:  # Lane change actions
-                if thresholds.get('lane_change_available', False):
-                    target_lane = ego_lane + (1 if action == 2 else -1)
-                    
-                    # Check if lane change is beneficial
-                    current_lane_density = lane_info['lane_counts'].get(ego_lane, 0)
-                    target_lane_density = lane_info['lane_counts'].get(target_lane, 0)
-                    
-                    if target_lane_density < current_lane_density:
-                        # Reward lane change if target lane is less congested
-                        lane_change_reward = 0.3 * (1 - risk_info.get('lane_change_risks', {}).get(target_lane, 1.0))
-                        
-                        # Update last lane change time if action is executed
-                        self.last_lane_change_time = time_elapsed
+                time_since_change = time_elapsed - self.last_lane_change_time
+                if time_since_change > self.lane_change_cooldown:
+                    lane_change_reward = 0.5  # Reward for safe lane change
+                    self.last_lane_change_time = time_elapsed
+                else:
+                    lane_change_reward = -0.5  # Penalty for too frequent lane changes
             
             # Combine rewards
-            total_reward = safety_penalty + speed_reward + lane_change_reward
+            total_reward = (
+                self.collision_weight * collision_reward +
+                self.speed_weight * speed_reward +
+                self.lane_change_weight * lane_change_reward
+            )
             
-            return total_reward, {
-                **thresholds,
-                'safety_penalty': safety_penalty,
-                'speed_reward': speed_reward,
-                'lane_change_reward': lane_change_reward
-            }
+            return total_reward
             
         except Exception as e:
             print(f"Warning: Error in compute_safety_reward: {str(e)}")
-            # Return safe default values
-            return 0.0, {
-                'ttc_threshold': self.base_ttc_threshold,
-                'headway_threshold': self.base_headway_threshold,
-                'safety_distance': self.base_safety_distance,
-                'safety_weight': self.min_safety_weight,
-                'risk_factor': 0.5,
-                'safety_penalty': 0.0,
-                'speed_reward': 0.0,
-                'lane_change_reward': 0.0
-            }
+            return 0.0  # Safe default value
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, recent_size: int, epsilon: float = 0.4):
+    def __init__(self, capacity: int, alpha: float = 0.6, beta: float = 0.4, beta_increment: float = 0.001):
         self.capacity = capacity
-        self.recent_size = recent_size
-        self.epsilon = epsilon
-        self.buffer = []
-        self.priorities = []
-        self.position = 0
+        self.alpha = alpha  # Priority exponent
+        self.beta = beta    # Importance sampling exponent
+        self.beta_increment = beta_increment  # Beta increment per sampling
+        self.max_priority = 1.0
+        self.tree_idx = 0
+        self.size = 0
         
-    def add(self, state, action, reward, next_state, done, td_error=None):
-        if td_error is None:
-            td_error = max(self.priorities) if self.priorities else 1.0
+        # Initialize sum tree for priorities
+        self.sum_tree = np.zeros(2 * capacity - 1)  # Tree structure
+        self.data = np.zeros(capacity, dtype=object)  # Data storage
+        self.priorities = np.zeros(capacity)  # Store priorities for updating
+        
+    def _propagate(self, idx: int, change: float):
+        """Propagate priority change up through the tree."""
+        parent = (idx - 1) // 2
+        self.sum_tree[parent] += change
+        if parent > 0:
+            self._propagate(parent, change)
             
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(None)
-            self.priorities.append(None)
+    def _retrieve(self, idx: int, s: float) -> int:
+        """Find sample index given a priority value."""
+        left = 2 * idx + 1
+        right = left + 1
         
-        self.buffer[self.position] = (state, action, reward, next_state, done)
-        self.priorities[self.position] = td_error
-        self.position = (self.position + 1) % self.capacity
+        if left >= len(self.sum_tree):
+            return idx
+            
+        if s <= self.sum_tree[left]:
+            return self._retrieve(left, s)
+        else:
+            return self._retrieve(right, s - self.sum_tree[left])
+            
+    def add(self, state, action, reward, next_state, done, error=None):
+        """Add new experience with priority."""
+        # Use max priority for new experiences
+        priority = self.max_priority if error is None else min(abs(error) + 1e-5, self.max_priority)
+        
+        idx = self.tree_idx
+        self.data[idx] = (state, action, reward, next_state, done)
+        self.update(idx, priority)
+        
+        self.tree_idx = (self.tree_idx + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+        
+    def update(self, idx: int, priority: float):
+        """Update priority of experience."""
+        priority = min(abs(priority) + 1e-5, self.max_priority) ** self.alpha
+        change = priority - self.sum_tree[idx + self.capacity - 1]
+        self.sum_tree[idx + self.capacity - 1] = priority
+        self.priorities[idx] = priority
+        self._propagate(idx + self.capacity - 1, change)
         
     def sample(self, batch_size: int) -> Tuple:
-        if random.random() < self.epsilon and len(self.buffer) > self.recent_size:
-            # Sample from recent transitions
-            indices = range(max(0, len(self.buffer) - self.recent_size), len(self.buffer))
-        else:
-            # Sample based on priorities
-            priorities = np.array(self.priorities[:len(self.buffer)])
-            probs = priorities / priorities.sum()
-            indices = np.random.choice(len(self.buffer), size=batch_size, p=probs)
+        """Sample batch with priorities."""
+        batch_indices = []
+        batch = []
+        weights = np.zeros(batch_size)
         
-        states, actions, rewards, next_states, dones = [], [], [], [], []
-        for idx in indices:
-            state, action, reward, next_state, done = self.buffer[idx]
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            next_states.append(next_state)
-            dones.append(done)
+        # Compute segment size
+        segment = self.sum_tree[0] / batch_size
+        self.beta = min(1.0, self.beta + self.beta_increment)
+        
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            s = random.uniform(a, b)
             
+            idx = self._retrieve(0, s)
+            idx_data = idx - self.capacity + 1
+            
+            if idx_data < 0 or self.data[idx_data] is None:
+                # If invalid index or empty data, resample
+                idx_data = random.randint(0, max(0, self.size - 1))
+            
+            batch_indices.append(idx_data)
+            batch.append(self.data[idx_data])
+        
+        # Compute importance sampling weights
+        p_min = np.min(self.priorities[:self.size]) / self.sum_tree[0]
+        max_weight = (p_min * self.size) ** (-self.beta)
+        
+        for i, idx in enumerate(batch_indices):
+            p_sample = self.sum_tree[idx + self.capacity - 1] / self.sum_tree[0]
+            weights[i] = ((p_sample * self.size) ** (-self.beta)) / max_weight
+        
+        states, actions, rewards, next_states, dones = zip(*batch)
         return (np.array(states), np.array(actions), np.array(rewards), 
-                np.array(next_states), np.array(dones), indices)
+                np.array(next_states), np.array(dones), weights, batch_indices)
     
-    def update_priorities(self, indices: List[int], td_errors: List[float]):
-        for idx, td_error in zip(indices, td_errors):
-            self.priorities[idx] = abs(td_error) + 1e-6  # Small constant for stability
+    def update_batch_priorities(self, indices: List[int], priorities: List[float]):
+        """Update priorities for a batch of experiences."""
+        for idx, priority in zip(indices, priorities):
+            self.update(idx, priority)
+            self.max_priority = max(self.max_priority, priority)
             
     def __len__(self):
-        return len(self.buffer)
+        return self.size
 
-class Actor(tf.keras.Model):
+class DQNNetwork(tf.keras.Model):
     def __init__(self, state_dim: Tuple[int, ...], action_dim: int, hidden_dims: List[int]):
-        super(Actor, self).__init__()
-        self.action_dim = action_dim
+        super(DQNNetwork, self).__init__()
         
         # Flatten layer to handle 2D state input
         self.flatten = tf.keras.layers.Flatten()
@@ -337,189 +206,176 @@ class Actor(tf.keras.Model):
         self.layers_list = []
         for dim in hidden_dims:
             self.layers_list.extend([
-                tf.keras.layers.Dense(dim, activation='relu'),
-                tf.keras.layers.LayerNormalization()
-            ])
-        
-        # Final layer for action logits
-        self.action_head = tf.keras.layers.Dense(action_dim)
-        
-    def call(self, state):
-        x = self.flatten(state)
-        for layer in self.layers_list:
-            x = layer(x)
-        return self.action_head(x)
-    
-    def get_action_probs(self, state):
-        logits = self(state)  # Shape: [batch_size, action_dim]
-        return tf.nn.softmax(logits, axis=-1)  # Shape: [batch_size, action_dim]
-
-class Critic(tf.keras.Model):
-    def __init__(self, state_dim: Tuple[int, ...], action_dim: int, hidden_dims: List[int]):
-        super(Critic, self).__init__()
-        
-        # Flatten layer to handle 2D state input
-        self.flatten = tf.keras.layers.Flatten()
-        
-        self.layers_list = []
-        for dim in hidden_dims:
-            self.layers_list.extend([
-                tf.keras.layers.Dense(dim, activation='relu'),
-                tf.keras.layers.LayerNormalization()
+                tf.keras.layers.Dense(
+                    dim, 
+                    activation='relu',
+                    kernel_initializer=tf.keras.initializers.HeUniform(),
+                    bias_initializer=tf.keras.initializers.Zeros()
+                ),
+                tf.keras.layers.BatchNormalization(),
+                tf.keras.layers.Dropout(0.1)
             ])
             
-        # Final layer for Q-values
-        self.q_head = tf.keras.layers.Dense(action_dim)
+        # Final layer for Q-values with proper initialization
+        self.q_head = tf.keras.layers.Dense(
+            action_dim,
+            kernel_initializer=tf.keras.initializers.HeUniform(),
+            bias_initializer=tf.keras.initializers.Zeros()
+        )
         
-    def call(self, state):
+    def call(self, state, training=False):
         x = self.flatten(state)
         for layer in self.layers_list:
-            x = layer(x)
-        return self.q_head(x)  # Shape: [batch_size, action_dim]
+            if isinstance(layer, tf.keras.layers.BatchNormalization) or \
+               isinstance(layer, tf.keras.layers.Dropout):
+                x = layer(x, training=training)
+            else:
+                x = layer(x)
+        return self.q_head(x)
 
-class DBSAC:
+class DQN:
     def __init__(
         self,
         state_dim: Tuple[int, ...],
         action_dim: int,
         hidden_dims: List[int] = [256, 256],
-        actor_lr: float = 3e-4,
-        critic_lr: float = 3e-4,
+        learning_rate: float = 1e-4,
         gamma: float = 0.99,
+        epsilon_start: float = 1.0,
+        epsilon_end: float = 0.02,
+        epsilon_decay_steps: int = 10000,
         tau: float = 0.005,
-        alpha: float = 0.2,
-        buffer_capacity: int = 100000,
-        recent_size: int = 10000,
-        batch_size: int = 256,
-        checkpoint_dir: str = "./checkpoints"
+        buffer_capacity: int = 20000,
+        batch_size: int = 128,
+        update_target_every: int = 100,
+        checkpoint_dir: str = "./checkpoints",
+        per_alpha: float = 0.6,
+        per_beta: float = 0.4,
+        per_beta_increment: float = 0.001
     ):
         self.gamma = gamma
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay_steps = epsilon_decay_steps
+        self.epsilon_decay = (epsilon_start - epsilon_end) / epsilon_decay_steps
         self.tau = tau
-        self.alpha = alpha
         self.batch_size = batch_size
         self.action_dim = action_dim
+        self.update_target_every = update_target_every
         self.checkpoint_dir = checkpoint_dir
+        self.train_step_counter = 0
+        self.total_steps = 0
         
-        # Initialize networks
-        self.actor = Actor(state_dim, action_dim, hidden_dims)
-        self.critic_1 = Critic(state_dim, action_dim, hidden_dims)
-        self.critic_2 = Critic(state_dim, action_dim, hidden_dims)
-        self.target_critic_1 = Critic(state_dim, action_dim, hidden_dims)
-        self.target_critic_2 = Critic(state_dim, action_dim, hidden_dims)
+        # Initialize networks with proper initialization
+        self.q_network = DQNNetwork(state_dim, action_dim, hidden_dims)
+        self.target_network = DQNNetwork(state_dim, action_dim, hidden_dims)
         
         # Build models by calling them once
         dummy_state = tf.zeros((1,) + state_dim)
-        self.actor(dummy_state)
-        self.critic_1(dummy_state)
-        self.critic_2(dummy_state)
-        self.target_critic_1(dummy_state)
-        self.target_critic_2(dummy_state)
+        self.q_network(dummy_state)
+        self.target_network(dummy_state)
         
-        # Copy weights to target networks
-        self.target_critic_1.set_weights(self.critic_1.get_weights())
-        self.target_critic_2.set_weights(self.critic_2.get_weights())
+        # Copy weights to target network
+        self.target_network.set_weights(self.q_network.get_weights())
         
-        # Initialize optimizers
-        self.actor_optimizer = tf.keras.optimizers.Adam(actor_lr)
-        self.critic_1_optimizer = tf.keras.optimizers.Adam(critic_lr)
-        self.critic_2_optimizer = tf.keras.optimizers.Adam(critic_lr)
+        # Initialize optimizer with gradient clipping
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
         
-        # Initialize replay buffer
-        self.replay_buffer = ReplayBuffer(buffer_capacity, recent_size)
+        # Initialize prioritized replay buffer
+        self.replay_buffer = ReplayBuffer(
+            capacity=buffer_capacity,
+            alpha=per_alpha,
+            beta=per_beta,
+            beta_increment=per_beta_increment
+        )
         
-    def _update_target(self, target_weights, weights):
-        """Update target weights using exponential moving average."""
-        for target_w, w in zip(target_weights, weights):
-            target_w.assign(self.tau * w + (1 - self.tau) * target_w)
+        # Initialize Huber loss for more stable training
+        self.loss_fn = tf.keras.losses.Huber(reduction=tf.keras.losses.Reduction.NONE)
+        
+    def _update_target(self):
+        """Soft update target network weights."""
+        for target_weights, q_weights in zip(self.target_network.weights, self.q_network.weights):
+            target_weights.assign(self.tau * q_weights + (1 - self.tau) * target_weights)
             
     def update(self, batch_size: int) -> Dict[str, float]:
         if len(self.replay_buffer) < batch_size:
             return {}
             
-        states, actions, rewards, next_states, dones, indices = self.replay_buffer.sample(batch_size)
+        states, actions, rewards, next_states, dones, weights, indices = self.replay_buffer.sample(batch_size)
         
-        # Convert to tensors
+        # Convert to tensors and ensure proper shapes
         states = tf.convert_to_tensor(states, dtype=tf.float32)
         next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
         rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
         dones = tf.convert_to_tensor(dones, dtype=tf.float32)
+        actions = tf.convert_to_tensor(actions, dtype=tf.int32)
+        weights = tf.convert_to_tensor(weights, dtype=tf.float32)
         
-        with tf.GradientTape(persistent=True) as tape:
-            # Actor loss
-            action_probs = self.actor.get_action_probs(states)
-            log_action_probs = tf.math.log(action_probs + 1e-8)
-            
-            q1_values = self.critic_1(states)
-            q2_values = self.critic_2(states)
-            min_q_values = tf.minimum(q1_values, q2_values)
-            
-            actor_loss = tf.reduce_mean(
-                tf.reduce_sum(
-                    action_probs * (self.alpha * log_action_probs - min_q_values),
-                    axis=1
-                )
-            )
-            
-            # Critic loss
-            next_action_probs = self.actor.get_action_probs(next_states)
-            next_log_action_probs = tf.math.log(next_action_probs + 1e-8)
-            
-            next_q1_values = self.target_critic_1(next_states)
-            next_q2_values = self.target_critic_2(next_states)
-            next_min_q_values = tf.minimum(next_q1_values, next_q2_values)
-            
-            next_values = tf.reduce_sum(
-                next_action_probs * (next_min_q_values - self.alpha * next_log_action_probs),
-                axis=1
-            )
-            
-            target_q_values = rewards + (1 - dones) * self.gamma * next_values
-            target_q_values = tf.stop_gradient(target_q_values)
-            
-            q1_values_selected = tf.reduce_sum(q1_values * tf.one_hot(actions, self.action_dim), axis=1)
-            q2_values_selected = tf.reduce_sum(q2_values * tf.one_hot(actions, self.action_dim), axis=1)
-            
-            critic_1_loss = tf.reduce_mean(tf.square(q1_values_selected - target_q_values))
-            critic_2_loss = tf.reduce_mean(tf.square(q2_values_selected - target_q_values))
+        # Add batch dimension if necessary
+        if len(states.shape) == 1:
+            states = tf.expand_dims(states, 0)
+            next_states = tf.expand_dims(next_states, 0)
+            rewards = tf.expand_dims(rewards, 0)
+            dones = tf.expand_dims(dones, 0)
+            actions = tf.expand_dims(actions, 0)
+            weights = tf.expand_dims(weights, 0)
         
-        # Update networks
-        actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
-        critic_1_grads = tape.gradient(critic_1_loss, self.critic_1.trainable_variables)
-        critic_2_grads = tape.gradient(critic_2_loss, self.critic_2.trainable_variables)
+        with tf.GradientTape() as tape:
+            # Compute Q values for current states
+            q_values = self.q_network(states)
+            q_values_selected = tf.gather(q_values, actions, batch_dims=1)
+            
+            # Compute target Q values with Double DQN
+            next_q_values = self.q_network(next_states)
+            next_actions = tf.argmax(next_q_values, axis=1)
+            next_q_values_target = self.target_network(next_states)
+            next_q_values_selected = tf.gather(next_q_values_target, next_actions, batch_dims=1)
+            
+            # Compute targets with proper broadcasting
+            target_q_values = rewards + (1 - dones) * self.gamma * next_q_values_selected
+            
+            # Compute TD errors for updating priorities
+            td_errors = target_q_values - q_values_selected
+            
+            # Compute loss with importance sampling weights
+            losses = self.loss_fn(target_q_values, q_values_selected)
+            weighted_losses = tf.multiply(losses, weights)
+            loss = tf.reduce_mean(weighted_losses)
         
-        self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
-        self.critic_1_optimizer.apply_gradients(zip(critic_1_grads, self.critic_1.trainable_variables))
-        self.critic_2_optimizer.apply_gradients(zip(critic_2_grads, self.critic_2.trainable_variables))
-        
-        del tape
-        
-        # Update target networks
-        self._update_target(self.target_critic_1.variables, self.critic_1.variables)
-        self._update_target(self.target_critic_2.variables, self.critic_2.variables)
+        # Compute and apply gradients with clipping
+        gradients = tape.gradient(loss, self.q_network.trainable_variables)
+        gradients = [tf.clip_by_norm(g, 1.0) for g in gradients]
+        self.optimizer.apply_gradients(zip(gradients, self.q_network.trainable_variables))
         
         # Update priorities in replay buffer
-        td_errors = tf.abs(q1_values_selected - target_q_values)
-        self.replay_buffer.update_priorities(indices, td_errors.numpy())
+        td_errors_np = tf.abs(td_errors).numpy()
+        self.replay_buffer.update_batch_priorities(indices, td_errors_np)
+        
+        # Periodically update target network
+        self.train_step_counter += 1
+        if self.train_step_counter % self.update_target_every == 0:
+            self._update_target()
+        
+        # Update total steps and decay epsilon
+        self.total_steps += 1
+        if self.total_steps < self.epsilon_decay_steps:
+            self.epsilon = max(self.epsilon_end, 
+                             self.epsilon - self.epsilon_decay)
         
         return {
-            'actor_loss': float(actor_loss),
-            'critic_1_loss': float(critic_1_loss),
-            'critic_2_loss': float(critic_2_loss)
+            'loss': float(loss),
+            'epsilon': float(self.epsilon),
+            'max_q': float(tf.reduce_max(q_values)),
+            'mean_td_error': float(tf.reduce_mean(tf.abs(td_errors)))
         }
         
     def select_action(self, state, evaluate=False):
+        if not evaluate and random.random() < self.epsilon:
+            return random.randint(0, self.action_dim - 1)
+            
         state = tf.convert_to_tensor([state], dtype=tf.float32)
-        action_probs = self.actor.get_action_probs(state)[0]  # Shape: [num_actions]
-        
-        if evaluate:
-            action = tf.argmax(action_probs).numpy()
-        else:
-            # Reshape to [1, num_actions] for tf.random.categorical
-            action_probs = tf.reshape(action_probs, (1, -1))
-            action = tf.random.categorical(tf.math.log(action_probs + 1e-8), 1)[0, 0].numpy()
-        
-        # Ensure action is within bounds
-        return int(tf.clip_by_value(action, 0, self.action_dim - 1))
+        q_values = self.q_network(state)[0]
+        return int(tf.argmax(q_values))
             
     def save_models(self, path: str, save_buffer: bool = True, episode: int = None, metrics: Dict = None):
         """Save model weights, replay buffer, and training metrics."""
@@ -527,9 +383,8 @@ class DBSAC:
             os.makedirs(path)
             
         # Save model weights
-        self.actor.save_weights(f"{path}/actor.weights.h5")
-        self.critic_1.save_weights(f"{path}/critic_1.weights.h5")
-        self.critic_2.save_weights(f"{path}/critic_2.weights.h5")
+        self.q_network.save_weights(f"{path}/q_network.weights.h5")
+        self.target_network.save_weights(f"{path}/target_network.weights.h5")
         
         # Save replay buffer if requested
         if save_buffer:
@@ -541,7 +396,8 @@ class DBSAC:
         if episode is not None or metrics is not None:
             metadata = {
                 'episode': episode,
-                'metrics': metrics or {}
+                'metrics': metrics or {},
+                'epsilon': self.epsilon
             }
             with open(os.path.join(path, "training_metadata.json"), 'w') as f:
                 json.dump(metadata, f)
@@ -549,11 +405,8 @@ class DBSAC:
     def load_models(self, path: str, load_buffer: bool = True):
         """Load model weights and optionally replay buffer."""
         # Load model weights
-        self.actor.load_weights(f"{path}/actor.weights.h5")
-        self.critic_1.load_weights(f"{path}/critic_1.weights.h5")
-        self.critic_2.load_weights(f"{path}/critic_2.weights.h5")
-        self.target_critic_1.set_weights(self.critic_1.get_weights())
-        self.target_critic_2.set_weights(self.critic_2.get_weights())
+        self.q_network.load_weights(f"{path}/q_network.weights.h5")
+        self.target_network.load_weights(f"{path}/target_network.weights.h5")
         
         # Load replay buffer if requested and exists
         if load_buffer and os.path.exists(os.path.join(path, "replay_buffer.pkl")):
@@ -564,10 +417,12 @@ class DBSAC:
         metadata_path = os.path.join(path, "training_metadata.json")
         if os.path.exists(metadata_path):
             with open(metadata_path, 'r') as f:
-                return json.load(f)
+                metadata = json.load(f)
+                self.epsilon = metadata.get('epsilon', self.epsilon)
+                return metadata
         return None
 
-def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", start_episode=0, max_episodes=1000):
+def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", start_episode=0, max_episodes=10000):
     """Train agent with enhanced safety and lane changing behavior."""
     # Ensure checkpoint directory exists
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -592,25 +447,25 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
         },
         'action': {
             'type': 'DiscreteMetaAction',
-            'target_speeds': [25, 30],
+            'target_speeds': [20, 25, 30],
             'longitudinal': True,
             'lateral': True,
         },
         'lanes_count': 4,
-        'vehicles_count': 50,
+        'vehicles_count': 40,
         'duration': 40,
-        'initial_spacing': 2,
-        'collision_reward': -2.0,
+        'initial_spacing': 2.5,
+        'collision_reward': -10.0,  # Increased collision penalty significantly
         'high_speed_reward': 0.4,
-        'right_lane_reward': 0.1,
-        'lane_change_reward': 0.2,
-        'reward_speed_range': [25, 30],
+        'right_lane_reward': 0.0,   # Removed right lane bias
+        'lane_change_reward': 0.4,   # Increased reward for lane changes
+        'reward_speed_range': [20, 30],
         'normalize_reward': True,
         'offroad_terminal': True,
         'simulation_frequency': 15,
         'policy_frequency': 5,
-        'screen_width': 800,
-        'screen_height': 600,
+        'screen_width': 600,
+        'screen_height': 150,
         'centering_position': [0.3, 0.5],
         'scaling': 5.5,
         'show_trajectories': True
@@ -620,10 +475,23 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
     state_dim = env.observation_space.shape
     action_dim = env.action_space.n
     
-    # Initialize agent
-    agent = DBSAC(
+    # Calculate total training steps for epsilon decay
+    total_training_steps = max_episodes * 1000  # max_steps per episode
+    
+    # Initialize agent with optimized hyperparameters for DQN
+    agent = DQN(
         state_dim=state_dim,
         action_dim=action_dim,
+        hidden_dims=[256, 256],
+        learning_rate=2.5e-4,
+        gamma=0.99,
+        epsilon_start=1.0,
+        epsilon_end=0.02,
+        epsilon_decay_steps=10000,  # Decay over 10000 steps
+        tau=0.005,
+        buffer_capacity=20000,  # Reduced from 100000 to 20000 (about 20 episodes worth of experience)
+        batch_size=128,
+        update_target_every=100,
         checkpoint_dir=checkpoint_dir
     )
     
@@ -641,13 +509,24 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
     
     # Training parameters
     max_steps = 1000
-    batch_size = 256
+    batch_size = 64
     eval_interval = 10
-    checkpoint_interval = 100  # Save checkpoint every 100 episodes
+    checkpoint_interval = 50
+    min_samples = 1000
     
     # Training metrics
     episode_rewards = []
-    training_metrics = {'episode_rewards': [], 'avg_rewards': []}
+    training_metrics = {
+        'episode_rewards': [],
+        'avg_rewards': [],
+        'losses': [],
+        'epsilons': [],
+        'max_q_values': []
+    }
+    
+    # Initialize running metrics
+    running_loss = []
+    running_max_q = []
     
     print(f"Starting training from episode {start_episode}")
     print(f"Checkpoints will be saved every {checkpoint_interval} episodes to: {checkpoint_dir}")
@@ -657,53 +536,90 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
             state, _ = env.reset()
             episode_reward = 0
             episode_start_time = time.time()
+            episode_losses = []
+            episode_max_qs = []
             
             for step in range(max_steps):
                 action = agent.select_action(state)
                 next_state, reward, done, truncated, info = env.step(action)
                 
-                # Extract enhanced state information
-                ego_speed = info.get('speed', 0)
-                vehicles_info = info.get('vehicles_info', [])
-                ttc = info.get('time_to_collision', float('inf'))
-                headway = info.get('headway', float('inf'))
-                ego_lane = info.get('lane_index', 0)
+                # Get current time for safety module
                 time_elapsed = time.time() - episode_start_time
                 
-                # Compute enhanced safety reward
-                safety_reward, metrics = safety_module.compute_safety_reward(
-                    ego_speed, vehicles_info, ttc, headway, ego_lane, action, time_elapsed
+                # Compute safety reward
+                safety_reward = safety_module.compute_safety_reward(
+                    state, action, info, time_elapsed
                 )
                 
-                # Combine rewards with emphasis on speed and safe lane changes
+                # Combine rewards
                 combined_reward = (
                     0.4 * reward +  # Original environment reward
-                    0.4 * safety_reward +  # Safety considerations
-                    0.2 * metrics['speed_reward']  # Additional speed incentive
+                    0.6 * safety_reward  # Safety considerations
                 )
                 
-                # Store transition with enhanced reward
-                agent.replay_buffer.add(state, action, combined_reward, next_state, done)
+                # Clip combined reward for stability
+                combined_reward = np.clip(combined_reward, -10.0, 2.0)
                 
-                if len(agent.replay_buffer) > batch_size:
-                    metrics = agent.update(batch_size)
-                    
+                # Store transition
+                agent.replay_buffer.add(
+                    state=state,
+                    action=action,
+                    reward=combined_reward,
+                    next_state=next_state,
+                    done=done,
+                    error=None
+                )
+                
+                # Update network if we have enough samples
+                if len(agent.replay_buffer) > min_samples:
+                    update_info = agent.update(batch_size)
+                    if update_info:
+                        episode_losses.append(update_info['loss'])
+                        episode_max_qs.append(update_info['max_q'])
+                        
+                        # Track TD errors for monitoring learning progress
+                        if 'mean_td_error' in update_info:
+                            print(f"Step {step}, Mean TD Error: {update_info['mean_td_error']:.3f}", end='\r')
+                
                 episode_reward += combined_reward
                 state = next_state
                 
                 if done or truncated:
                     break
             
+            # Store episode metrics
             episode_rewards.append(episode_reward)
             training_metrics['episode_rewards'].append(episode_reward)
+            
+            # Update running metrics
+            if episode_losses:
+                avg_loss = np.mean(episode_losses)
+                running_loss.append(avg_loss)
+                training_metrics['losses'].append(avg_loss)
+            
+            if episode_max_qs:
+                avg_max_q = np.mean(episode_max_qs)
+                running_max_q.append(avg_max_q)
+                training_metrics['max_q_values'].append(avg_max_q)
+            
+            training_metrics['epsilons'].append(agent.epsilon)
             
             # Print progress
             if (episode + 1) % eval_interval == 0:
                 avg_reward = np.mean(episode_rewards[-eval_interval:])
                 training_metrics['avg_rewards'].append(avg_reward)
-                print(f"Episode {episode + 1}, Average Reward: {avg_reward:.2f}")
+                
+                # Compute metrics only if we have data
+                avg_loss = np.mean(running_loss[-eval_interval:]) if running_loss else float('nan')
+                avg_max_q = np.mean(running_max_q[-eval_interval:]) if running_max_q else float('nan')
+                
+                print(f"Episode {episode + 1}, "
+                      f"Average Reward: {avg_reward:.2f}, "
+                      f"Epsilon: {agent.epsilon:.3f}, "
+                      f"Loss: {avg_loss:.3f}, "
+                      f"Max Q: {avg_max_q:.3f}")
             
-            # Save checkpoint every 100 episodes
+            # Save checkpoint
             if (episode + 1) % checkpoint_interval == 0:
                 checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{episode + 1}")
                 
@@ -713,10 +629,7 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
                     temp_checkpoint_path,
                     save_buffer=True,
                     episode=episode,
-                    metrics={
-                        'episode_rewards': episode_rewards,
-                        'training_metrics': training_metrics
-                    }
+                    metrics=training_metrics
                 )
                 
                 # Safely replace old checkpoint
@@ -740,10 +653,7 @@ def train_agent(checkpoint_dir="/content/drive/MyDrive/highway_rl_checkpoints", 
             final_checkpoint_path,
             save_buffer=True,
             episode=episode,
-            metrics={
-                'episode_rewards': episode_rewards,
-                'training_metrics': training_metrics
-            }
+            metrics=training_metrics
         )
         print(f"Interrupted checkpoint saved at: {final_checkpoint_path}")
         
@@ -775,15 +685,24 @@ def evaluate_agent(agent, num_episodes=10):
             'features': ['presence', 'x', 'y', 'vx', 'vy'],
             'absolute': True,
             'normalize': True,
+            'vehicles_count': 15,  # Match the training environment
+            'features_range': {
+                'x': [-100, 100],
+                'y': [-100, 100],
+                'vx': [-30, 30],
+                'vy': [-30, 30]
+            },
         },
         'action': {
             'type': 'DiscreteMetaAction',
-            'target_speeds': [20, 25, 30]  
+            'target_speeds': [20, 25, 30],  # Match the training environment
+            'longitudinal': True,
+            'lateral': True,
         },
         'lanes_count': 4,
-        'vehicles_count': 50,
+        'vehicles_count': 40,  # Match the training environment
         'duration': 40,
-        'initial_spacing': 2
+        'initial_spacing': 2.5
     })
     
     eval_rewards = []
@@ -808,16 +727,38 @@ def evaluate_agent(agent, num_episodes=10):
     return np.mean(eval_rewards)
 
 if __name__ == "__main__":
+    # Mount Google Drive for Colab
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive')
+        print("Google Drive mounted successfully")
+    except ImportError:
+        print("Not running in Colab environment")
+    
     # Set up checkpoint directory in Google Drive
     CHECKPOINT_DIR = "/content/drive/MyDrive/highway_rl_checkpoints"
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
     print("Starting training...")
-    print(f"Checkpoints will be saved to: {CHECKPOINT_DIR}")
+    print(f"Checkpoints will be saved to Google Drive at: {CHECKPOINT_DIR}")
+    
+    # Verify Google Drive access
+    try:
+        test_file = os.path.join(CHECKPOINT_DIR, "test.txt")
+        with open(test_file, "w") as f:
+            f.write("Test file to verify Google Drive access")
+        os.remove(test_file)
+        print("Successfully verified Google Drive write access")
+    except Exception as e:
+        print(f"Warning: Could not verify Google Drive access. Error: {str(e)}")
+        print("Please ensure Google Drive is mounted properly")
     
     agent, training_rewards = train_agent(checkpoint_dir=CHECKPOINT_DIR)
     
     # Evaluate the trained agent
     print("\nStarting evaluation...")
     mean_eval_reward = evaluate_agent(agent)
-    print(f"\nMean evaluation reward: {mean_eval_reward:.2f}") 
+    print(f"\nMean evaluation reward: {mean_eval_reward:.2f}")
+    
+    print(f"\nCheckpoints have been saved to: {CHECKPOINT_DIR}")
+    print("You can find your saved models in Google Drive under the 'highway_rl_checkpoints' folder") 
